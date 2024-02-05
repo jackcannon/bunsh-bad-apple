@@ -1,0 +1,21 @@
+{
+  "name": "bunsh-bad-apple",
+  "module": "index.ts",
+  "type": "module",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@types/minimist": "^1.2.5",
+    "jimp": "^0.22.10",
+    "minimist": "^1.2.8",
+    "swiss-ak": "^2.13.1",
+    "swiss-node": "^3.1.1"
+  },
+  "scripts": {
+    "start": "bun run index.ts"
+  }
+}
