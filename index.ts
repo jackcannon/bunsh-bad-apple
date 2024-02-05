@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 
 import minimist from 'minimist';
-import { ArrayTools, PromiseTools, fn, seconds, wait, waitUntil } from 'swiss-ak';
+import { ArrayTools, PromiseTools, fn, getProgressBar, seconds, wait, waitUntil } from 'swiss-ak';
 import { ansi, ask, out, getLineCounter, getKeyListener } from 'swiss-node';
 import Jimp from 'jimp';
 
@@ -51,11 +51,17 @@ let userInput = await (async () => {
     const idealHeight = Math.floor(Math.min(width / videoStats.aspectRatio, maxRows * 2));
     const height = await ask.number('How tall would you like the display?', idealHeight);
 
+    const preprocess = await ask.boolean('Would you like to pre-process the frames?', true);
+
     const showFramerate = await ask.boolean('Would you like to display the framerate?', false);
+
+    lc.log('Hint: Use a lower threshold for darker videos and a higher threshold for brighter videos.');
+    lc.log('      50% is fine for bad apple');
+    const threshold = await ask.number('What threshold would you like to use (%)?', 50);
 
     loader = out.loading((s) => `Extracting the frames from the video: ${s}`);
 
-    return { width, height, showFramerate };
+    return { width, height, preprocess, showFramerate, threshold };
   };
 
   const { userInput } = await PromiseTools.allObj({
@@ -66,10 +72,20 @@ let userInput = await (async () => {
   return userInput;
 })();
 
+const kl = getKeyListener((key) => {
+  switch (key) {
+    case 'q':
+    case 'esc':
+    case 'exit':
+      process.stdout.write(ansi.clear + ansi.cursor.show);
+      process.exit(0);
+  }
+});
+
 const allFrames = (await fs.readdir(DIR_FRAMES)).sort().map((frame) => path.join(DIR_FRAMES, frame));
 
 const getSingleFrameOutput = async (frame: string) => {
-  await $`gm convert ${frame} -resize ${`${userInput.width}x${userInput.height}!`} -threshold 50% ${frame}`.text();
+  await $`gm convert ${frame} -resize ${`${userInput.width}x${userInput.height}!`} -threshold ${`${userInput.threshold}%`} ${frame}`.text();
   const image = await Jimp.read(frame);
 
   const { width, height, data } = image.bitmap;
@@ -95,8 +111,28 @@ const getSingleFrameOutput = async (frame: string) => {
   result = result.slice(0, -1);
 
   result = out.center(result);
+
+  await wait(10);
   return result;
 };
+
+const preprocessed: string[] = await (async () => {
+  if (!userInput.preprocess) return [];
+
+  lc.log('');
+  const progress = getProgressBar(allFrames.length, { prefix: 'Processing frames', prefixWidth: 20 });
+  progress.start();
+
+  const result = await PromiseTools.mapLimit(32, allFrames, async (frame) => {
+    const result = await getSingleFrameOutput(frame);
+    progress.next();
+    return result;
+  });
+
+  lc.wrap(2, () => progress.finish());
+
+  return result;
+})();
 
 // run animation
 {
@@ -111,23 +147,13 @@ const getSingleFrameOutput = async (frame: string) => {
     lc.overwrite(output);
   };
 
-  const kl = getKeyListener((key) => {
-    switch (key) {
-      case 'q':
-      case 'esc':
-      case 'exit':
-        process.stdout.write(ansi.clear + ansi.cursor.show);
-        process.exit(0);
-    }
-  });
-
   process.stdout.write(ansi.cursor.hide);
   const perFrame = seconds(1 / videoStats.framerate);
   const start = Date.now();
   let lastFrameTime = Date.now();
   for (let i = 0; i < frameOuts.length; i++) {
     const processStart = Date.now();
-    const frameOutput = await getSingleFrameOutput(allFrames[i]);
+    const frameOutput = userInput.preprocess ? preprocessed[i] : await getSingleFrameOutput(allFrames[i]);
     const processTime = Date.now() - processStart;
 
     const thisFrameTime = Date.now();
@@ -149,4 +175,6 @@ const getSingleFrameOutput = async (frame: string) => {
     await waitUntil(start + (i + 1) * perFrame);
   }
   process.stdout.write(ansi.cursor.show);
+  kl.stop();
+  process.exit();
 }
