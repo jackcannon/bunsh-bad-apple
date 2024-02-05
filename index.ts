@@ -4,11 +4,8 @@ import path from 'path';
 
 import minimist from 'minimist';
 import { ArrayTools, PromiseTools, fn, seconds, wait, waitUntil } from 'swiss-ak';
-import { ansi, ask, out, LOG, getLineCounter, getKeyListener } from 'swiss-node';
+import { ansi, ask, out, getLineCounter, getKeyListener } from 'swiss-node';
 import Jimp from 'jimp';
-
-await LOG('---- START ----');
-await LOG('---- START ----');
 
 const lc = getLineCounter();
 ask.customise({ general: { lc } });
@@ -37,12 +34,10 @@ let userInput = await (async () => {
   let loader: ReturnType<typeof out.loading> = { stop: fn.noop };
 
   const extractFramesFromVideo = async () => {
-    // const loader = out.loading((s) => `Extracting the frames from the video: ${s}`);
     await fs.rm(DIR_FRAMES, { recursive: true });
     await fs.mkdir(DIR_FRAMES, { recursive: true });
 
     await $`ffmpeg -r 1 -i ${FILE_SRC} -r 1 ${path.join(DIR_FRAMES, 'frame-%04d.bmp')}`.quiet();
-    // loader.stop();
   };
 
   // ask for the output size and framerate
