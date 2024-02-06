@@ -3,12 +3,15 @@ import fs from 'fs/promises';
 import path from 'path';
 
 import minimist from 'minimist';
-import { ArrayTools, PromiseTools, fn, getProgressBar, seconds, wait, waitUntil } from 'swiss-ak';
+import { ArrayTools, ColourTools, PromiseTools, fn, getProgressBar, seconds, wait, waitUntil } from 'swiss-ak';
 import { ansi, ask, out, getLineCounter, getKeyListener } from 'swiss-node';
 import Jimp from 'jimp';
+import { getTerminalSizeBox } from './utils/getTerminalSizeBox';
+import { ditherImage } from './utils/dither';
+import { spreadLuminance } from './utils/spreadLuminance';
 
 const lc = getLineCounter();
-ask.customise({ general: { lc } });
+ask.customise({ general: { lc, timelineFastSpeed: 20 }, formatters: { formatPrompt: 'fullBox' } });
 
 const args = minimist(process.argv.slice(2));
 
@@ -25,8 +28,9 @@ const videoStats = await (async () => {
   const height = Number(probe.height);
   const aspectRatio = width / height;
   const framerate = Number(probe.r_frame_rate.split('/')[0]) / Number(probe.r_frame_rate.split('/')[1]);
+  const numFrames = Number(probe.nb_frames);
 
-  return { width, height, framerate, aspectRatio };
+  return { width, height, framerate, aspectRatio, numFrames };
 })();
 
 // extract and get user input (at same time)
@@ -45,23 +49,46 @@ let userInput = await (async () => {
     const maxCols = process.stdout.columns;
     const maxRows = process.stdout.rows - 1;
 
-    const maxWidth = Math.floor(Math.min(maxCols, videoStats.width, maxRows * 2 * videoStats.aspectRatio));
-    const width = await ask.number('How wide would you like the display?', maxWidth);
+    const suggWidth = Math.floor(Math.min(maxCols, videoStats.width, maxRows * 2 * videoStats.aspectRatio));
+    const suggHeight = Math.floor(Math.min(suggWidth / videoStats.aspectRatio, maxRows * 2));
+
+    lc.log();
+    lc.log(out.center('Terminal Size:', undefined, ' ', false));
+    lc.log(out.center(getTerminalSizeBox(maxCols, maxRows), undefined, ' ', false));
+    lc.log();
+    lc.log(out.center(`Suggested Width: ${suggWidth}`, undefined, ' ', false));
+    lc.log(out.center(`Suggested Height: ${suggHeight}`, undefined, ' ', false));
+
+    const width = await ask.number('How wide would you like the display?', suggWidth);
 
     const idealHeight = Math.floor(Math.min(width / videoStats.aspectRatio, maxRows * 2));
     const height = await ask.number('How tall would you like the display?', idealHeight);
 
     const preprocess = await ask.boolean('Would you like to pre-process the frames?', true);
 
-    const showFramerate = await ask.boolean('Would you like to display the framerate?', false);
+    const dither = await ask.boolean('Would you like to dither the output?', true);
 
-    lc.log('Hint: Use a lower threshold for darker videos and a higher threshold for brighter videos.');
-    lc.log('      50% is fine for bad apple');
+    const showFramerate = await ask.boolean('Would you like to display the framerate?', true);
+
+    lc.log();
+    lc.log('  Hint: Use a lower threshold for darker videos and a higher threshold for brighter videos.');
+    lc.log('        50% is fine for bad apple');
+    lc.log();
     const threshold = await ask.number('What threshold would you like to use (%)?', 50);
+
+    console.log(videoStats.numFrames, videoStats.framerate);
+
+    lc.checkpoint('pre-trim');
+    let trim: { start: number; end: number } = { start: 0, end: videoStats.numFrames };
+    const isTrim = await ask.boolean('Would you like to trim the video?', false);
+    if (isTrim) {
+      lc.clearToCheckpoint('pre-trim');
+      trim = await ask.trim('How would you like to trim the video?', videoStats.numFrames, videoStats.framerate);
+    }
 
     loader = out.loading((s) => `Extracting the frames from the video: ${s}`);
 
-    return { width, height, preprocess, showFramerate, threshold };
+    return { width, height, preprocess, dither, showFramerate, threshold, trim };
   };
 
   const { userInput } = await PromiseTools.allObj({
@@ -82,28 +109,40 @@ const kl = getKeyListener((key) => {
   }
 });
 
-const allFrames = (await fs.readdir(DIR_FRAMES)).sort().map((frame) => path.join(DIR_FRAMES, frame));
+const allFrames = (await fs.readdir(DIR_FRAMES))
+  .sort()
+  .map((frame) => path.join(DIR_FRAMES, frame))
+  .slice(userInput.trim.start, userInput.trim.end);
 
 const getSingleFrameOutput = async (frame: string) => {
-  await $`gm convert ${frame} -resize ${`${userInput.width}x${userInput.height}!`} -threshold ${`${userInput.threshold}%`} ${frame}`.text();
+  const colourArgs = userInput.dither ? '' : `-threshold ${`${userInput.threshold}%`}`;
+
+  await $`gm convert ${frame} -resize ${`${userInput.width}x${userInput.height}!`} ${colourArgs} ${frame}`.text();
   const image = await Jimp.read(frame);
 
   const { width, height, data } = image.bitmap;
 
-  const pixels: boolean[][] = ArrayTools.create(height, 1).map(() => []);
+  let pixels: number[][] = ArrayTools.create(height, 1).map(() => []);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      pixels[y][x] = data[(y * width + x) * 4] > 128;
+      const baseIndex = (y * width + x) * 4;
+      const rgb: [number, number, number] = [data[baseIndex], data[baseIndex + 1], data[baseIndex + 2]];
+      pixels[y][x] = ColourTools.getLuminance(rgb);
+      // if (userInput.dither) pixels[y][x] = spreadLuminance(pixels[y][x], 1.6);
     }
   }
+  const threshold = (userInput.threshold / 100) * 255;
 
+  pixels = ditherImage(pixels, width, height, threshold);
+
+  // const chars = [' ', '"', 'o', '8'];
   const chars = [' ', '▀', '▄', '█'];
   let result: string = '';
   for (let y = 0; y < height; y += 2) {
     for (let x = 0; x < width; x++) {
-      const isTop = Number(pixels[y]?.[x] ?? false);
-      const isBot = Number(pixels[y + 1]?.[x] ?? false);
-      result += chars[isTop * 1 + isBot * 2];
+      const isTop = (pixels[y]?.[x] ?? 0) > threshold;
+      const isBot = (pixels[y + 1]?.[x] ?? 0) > threshold;
+      result += chars[Number(isTop) * 1 + Number(isBot) * 2];
     }
     result += '\n';
   }
