@@ -76,8 +76,6 @@ let userInput = await (async () => {
     lc.log();
     const threshold = await ask.number('What threshold would you like to use (%)?', 50);
 
-    console.log(videoStats.numFrames, videoStats.framerate);
-
     lc.checkpoint('pre-trim');
     let trim: { start: number; end: number } = { start: 0, end: videoStats.numFrames };
     const isTrim = await ask.boolean('Would you like to trim the video?', false);
